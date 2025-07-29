@@ -13,7 +13,7 @@ class PDFHandwritingOCR:
     def __init__(self):
         # 初始化PaddleOCR，专门用于日语识别
         self.ocr = paddleocr.PaddleOCR(
-            use_textline_orientation=True,  # 替换 use_angle_cls
+            use_angle_cls=True,  # 修复：使用正确的参数名
             lang='japan'  # 日语识别
         )
         
@@ -285,8 +285,6 @@ class PDFHandwritingOCR:
         """
         判断文本是否可能是注番
         """
-        import re
-        
         # 清理文本
         text = text.strip().replace(' ', '')
         
@@ -296,7 +294,55 @@ class PDFHandwritingOCR:
         # 3. 不是JS开头
         
         patterns = [
-            r'^[A-Z]{1,3}\d{4,6}
+            r'^[A-Z]{1,3}\d{4,6}$',  # 修复：正确关闭正则表达式，1-3个字母 + 4-6个数字
+            r'^[A-Z]\d{6}$',         # 修复：正确关闭正则表达式，1个字母 + 6个数字
+            r'^[A-Z]{2}\d{5}$',      # 修复：正确关闭正则表达式，2个字母 + 5个数字
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, text) and not text.startswith('JS'):
+                return True
+        return False
+
+    def match_notes_to_items(self, potential_notes, js_items):
+        """
+        根据位置关系匹配注番和项番
+        注番通常在对应项番的上方
+        """
+        matched_pairs = []
+        
+        for js_item in js_items:
+            js_y = js_item['center_y']
+            js_x = js_item['center_x']
+            
+            # 找到在此JS项番上方且X坐标相近的注番
+            candidates = []
+            
+            for note in potential_notes:
+                note_y = note['center_y']
+                note_x = note['center_x']
+                
+                # 条件：注番在JS上方，且X坐标差距不太大
+                if (note_y < js_y and  # 注番在上方
+                    abs(note_x - js_x) < 100 and  # X坐标相近 (可调整阈值)
+                    js_y - note_y < 150):  # 距离不要太远 (可调整阈值)
+                    
+                    candidates.append({
+                        'note': note,
+                        'distance': js_y - note_y
+                    })
+            
+            # 选择距离最近的作为对应的注番
+            if candidates:
+                closest = min(candidates, key=lambda x: x['distance'])
+                matched_pairs.append({
+                    'note_number': closest['note']['text'],
+                    'item_number': js_item['text'],
+                    'note_bbox': closest['note']['bbox'],
+                    'item_bbox': js_item['bbox']
+                })
+        
+        return matched_pairs
 
     def process_pdf(self, pdf_path, output_file=None):
         """
@@ -475,7 +521,15 @@ def main():
             )
             
             if open_file:
-                os.startfile(output_file)  # Windows
+                # 修复：跨平台文件打开
+                try:
+                    os.startfile(output_file)  # Windows
+                except AttributeError:
+                    import subprocess
+                    try:
+                        subprocess.call(['open', output_file])  # macOS
+                    except:
+                        subprocess.call(['xdg-open', output_file])  # Linux
             
             root.destroy()
             
@@ -553,330 +607,3 @@ if __name__ == "__main__":
     else:
         # 标准模式 - 使用文件选择器
         main()
-,  # 1-3个字母 + 4-6个数字
-            r'^[A-Z]\d{6}
-
-    def process_pdf(self, pdf_path, output_file=None):
-        """
-        处理PDF文件的主函数
-        """
-        print(f"开始处理PDF: {pdf_path}")
-        
-        # 1. PDF转图片
-        images = self.pdf_to_images(pdf_path)
-        print(f"转换了 {len(images)} 页图片")
-        
-        all_results = []
-        
-        for page_num, image in enumerate(images):
-            print(f"\n处理第 {page_num + 1} 页...")
-            
-            # 2. 检测红色标记
-            red_regions = self.detect_red_marks(image)
-            print(f"检测到 {len(red_regions)} 个红色标记")
-            
-            # 3. 提取手写区域
-            handwriting_regions = self.extract_handwriting_regions(image, red_regions)
-            
-            # 4. 识别手写月份
-            page_results = []
-            for hw_region in handwriting_regions:
-                x, y, w, h = hw_region['bbox']
-                region_img = image[y:y+h, x:x+w]
-                
-                month = self.recognize_month_text(region_img)
-                if month:
-                    print(f"识别到月份: {month}")
-                    page_results.append({
-                        'month': month,
-                        'type': hw_region['type'],
-                        'bbox': hw_region['bbox']
-                    })
-            
-            # 5. 提取项番信息
-            items = self.extract_item_info(image, red_regions)
-            
-            all_results.append({
-                'page': page_num + 1,
-                'months': page_results,
-                'items': items
-            })
-        
-        # 保存结果
-        if output_file:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(all_results, f, ensure_ascii=False, indent=2)
-            print(f"\n结果已保存到: {output_file}")
-        
-        return all_results
-
-if __name__ == "__main__":
-    # 安装依赖检查
-    try:
-        import fitz
-        print("✓ PyMuPDF 已安装")
-    except ImportError:
-        print("需要安装 PyMuPDF: pip install PyMuPDF")
-    
-    try:
-        import paddleocr
-        # 测试基础功能
-        test_ocr = paddleocr.PaddleOCR(lang='ch')  # 删除show_log参数
-        print("✓ PaddleOCR 初始化成功")
-    except ImportError:
-        print("需要安装 PaddleOCR")
-    except Exception as e:
-        print(f"PaddleOCR 初始化失败: {e}")
-        print("可能需要更新 PaddleOCR 版本")
-    
-    # 运行主程序
-    main()
-,         # 1个字母 + 6个数字
-            r'^[A-Z]{2}\d{5}
-
-    def process_pdf(self, pdf_path, output_file=None):
-        """
-        处理PDF文件的主函数
-        """
-        print(f"开始处理PDF: {pdf_path}")
-        
-        # 1. PDF转图片
-        images = self.pdf_to_images(pdf_path)
-        print(f"转换了 {len(images)} 页图片")
-        
-        all_results = []
-        
-        for page_num, image in enumerate(images):
-            print(f"\n处理第 {page_num + 1} 页...")
-            
-            # 2. 检测红色标记
-            red_regions = self.detect_red_marks(image)
-            print(f"检测到 {len(red_regions)} 个红色标记")
-            
-            # 3. 提取手写区域
-            handwriting_regions = self.extract_handwriting_regions(image, red_regions)
-            
-            # 4. 识别手写月份
-            page_results = []
-            for hw_region in handwriting_regions:
-                x, y, w, h = hw_region['bbox']
-                region_img = image[y:y+h, x:x+w]
-                
-                month = self.recognize_month_text(region_img)
-                if month:
-                    print(f"识别到月份: {month}")
-                    page_results.append({
-                        'month': month,
-                        'type': hw_region['type'],
-                        'bbox': hw_region['bbox']
-                    })
-            
-            # 5. 提取项番信息
-            items = self.extract_item_info(image, red_regions)
-            
-            all_results.append({
-                'page': page_num + 1,
-                'months': page_results,
-                'items': items
-            })
-        
-        # 保存结果
-        if output_file:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(all_results, f, ensure_ascii=False, indent=2)
-            print(f"\n结果已保存到: {output_file}")
-        
-        return all_results
-
-def main():
-    """
-    使用示例
-    """
-    ocr_processor = PDFHandwritingOCR()
-    
-    # 替换为你的PDF文件路径
-    pdf_path = "your_document.pdf"
-    output_file = "recognition_results.json"
-    
-    if os.path.exists(pdf_path):
-        results = ocr_processor.process_pdf(pdf_path, output_file)
-        
-        # 打印结果摘要
-        print("\n=== 识别结果摘要 ===")
-        for result in results:
-            print(f"第{result['page']}页:")
-            for month_info in result['months']:
-                print(f"  月份: {month_info['month']}")
-                print(f"  类型: {month_info['type']}")
-    else:
-        print(f"PDF文件不存在: {pdf_path}")
-        print("请修改pdf_path为实际文件路径")
-
-if __name__ == "__main__":
-    # 安装依赖检查
-    try:
-        import fitz
-        print("✓ PyMuPDF 已安装")
-    except ImportError:
-        print("需要安装 PyMuPDF: pip install PyMuPDF")
-    
-    try:
-        import paddleocr
-        # 测试基础功能
-        test_ocr = paddleocr.PaddleOCR(lang='ch')  # 删除show_log参数
-        print("✓ PaddleOCR 初始化成功")
-    except ImportError:
-        print("需要安装 PaddleOCR")
-    except Exception as e:
-        print(f"PaddleOCR 初始化失败: {e}")
-        print("可能需要更新 PaddleOCR 版本")
-    
-    # 运行主程序
-    main()
-,      # 2个字母 + 5个数字
-        ]
-        
-        for pattern in patterns:
-            if re.match(pattern, text) and not text.startswith('JS'):
-                return True
-        return False
-
-    def match_notes_to_items(self, potential_notes, js_items):
-        """
-        根据位置关系匹配注番和项番
-        注番通常在对应项番的上方
-        """
-        matched_pairs = []
-        
-        for js_item in js_items:
-            js_y = js_item['center_y']
-            js_x = js_item['center_x']
-            
-            # 找到在此JS项番上方且X坐标相近的注番
-            candidates = []
-            
-            for note in potential_notes:
-                note_y = note['center_y']
-                note_x = note['center_x']
-                
-                # 条件：注番在JS上方，且X坐标差距不太大
-                if (note_y < js_y and  # 注番在上方
-                    abs(note_x - js_x) < 100 and  # X坐标相近 (可调整阈值)
-                    js_y - note_y < 150):  # 距离不要太远 (可调整阈值)
-                    
-                    candidates.append({
-                        'note': note,
-                        'distance': js_y - note_y
-                    })
-            
-            # 选择距离最近的作为对应的注番
-            if candidates:
-                closest = min(candidates, key=lambda x: x['distance'])
-                matched_pairs.append({
-                    'note_number': closest['note']['text'],
-                    'item_number': js_item['text'],
-                    'note_bbox': closest['note']['bbox'],
-                    'item_bbox': js_item['bbox']
-                })
-        
-        return matched_pairs
-
-    def process_pdf(self, pdf_path, output_file=None):
-        """
-        处理PDF文件的主函数
-        """
-        print(f"开始处理PDF: {pdf_path}")
-        
-        # 1. PDF转图片
-        images = self.pdf_to_images(pdf_path)
-        print(f"转换了 {len(images)} 页图片")
-        
-        all_results = []
-        
-        for page_num, image in enumerate(images):
-            print(f"\n处理第 {page_num + 1} 页...")
-            
-            # 2. 检测红色标记
-            red_regions = self.detect_red_marks(image)
-            print(f"检测到 {len(red_regions)} 个红色标记")
-            
-            # 3. 提取手写区域
-            handwriting_regions = self.extract_handwriting_regions(image, red_regions)
-            
-            # 4. 识别手写月份
-            page_results = []
-            for hw_region in handwriting_regions:
-                x, y, w, h = hw_region['bbox']
-                region_img = image[y:y+h, x:x+w]
-                
-                month = self.recognize_month_text(region_img)
-                if month:
-                    print(f"识别到月份: {month}")
-                    page_results.append({
-                        'month': month,
-                        'type': hw_region['type'],
-                        'bbox': hw_region['bbox']
-                    })
-            
-            # 5. 提取项番信息
-            items = self.extract_item_info(image, red_regions)
-            
-            all_results.append({
-                'page': page_num + 1,
-                'months': page_results,
-                'items': items
-            })
-        
-        # 保存结果
-        if output_file:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(all_results, f, ensure_ascii=False, indent=2)
-            print(f"\n结果已保存到: {output_file}")
-        
-        return all_results
-
-def main():
-    """
-    使用示例
-    """
-    ocr_processor = PDFHandwritingOCR()
-    
-    # 替换为你的PDF文件路径
-    pdf_path = "your_document.pdf"
-    output_file = "recognition_results.json"
-    
-    if os.path.exists(pdf_path):
-        results = ocr_processor.process_pdf(pdf_path, output_file)
-        
-        # 打印结果摘要
-        print("\n=== 识别结果摘要 ===")
-        for result in results:
-            print(f"第{result['page']}页:")
-            for month_info in result['months']:
-                print(f"  月份: {month_info['month']}")
-                print(f"  类型: {month_info['type']}")
-    else:
-        print(f"PDF文件不存在: {pdf_path}")
-        print("请修改pdf_path为实际文件路径")
-
-if __name__ == "__main__":
-    # 安装依赖检查
-    try:
-        import fitz
-        print("✓ PyMuPDF 已安装")
-    except ImportError:
-        print("需要安装 PyMuPDF: pip install PyMuPDF")
-    
-    try:
-        import paddleocr
-        # 测试基础功能
-        test_ocr = paddleocr.PaddleOCR(lang='ch')  # 删除show_log参数
-        print("✓ PaddleOCR 初始化成功")
-    except ImportError:
-        print("需要安装 PaddleOCR")
-    except Exception as e:
-        print(f"PaddleOCR 初始化失败: {e}")
-        print("可能需要更新 PaddleOCR 版本")
-    
-    # 运行主程序
-    main()
